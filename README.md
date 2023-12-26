@@ -5,7 +5,7 @@ Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.
 
 ## Files:
 * vice_monitor.py - The monitor program
-* mini6502asm.py - Standalone interactive assembler + disassembler, used by the monitor
+* miniasm6502.py - Standalone interactive assembler + disassembler, used by the monitor
   
 ## Commands:
 
@@ -23,4 +23,4 @@ Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.
 * save binary data / .prg files
 * fill memory
 
-  
+### Contributors welcome!
