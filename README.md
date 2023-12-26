@@ -1,5 +1,5 @@
 # pyvicemon
-Python remote machine language monitor for the VICE C64 emulator
+Remote machine language monitor for the VICE C64 emulator, implemented in Python
 
 Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.0.1
 
