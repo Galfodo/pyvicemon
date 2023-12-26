@@ -18,9 +18,12 @@ Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.
 
 ## TODO:
 * breakpoints
+* jump/goto address
 * modify memory
+* modify registers
 * load binary data / .prg files / .sid files
 * save binary data / .prg files
 * fill memory
+* ...more?
 
 ### Contributors welcome!
