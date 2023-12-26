@@ -22,7 +22,7 @@ VERBOSE = False
 
 VICE_SOCKET = None
 
-PROMPT = "(C:$[PROMPT_ADDR]) "
+PROMPT = "($[PROMPT_ADDR]) "
 PROMPT_ADDR = 0
 
 MEMDUMP_DEFAULT_BYTES = 256
@@ -166,7 +166,7 @@ class Body(object):
 class RegDump(Body):
     def __init__(self, data=b'', id_value_map: Dict = {}):
         super().__init__(data)
-        self.id_value_map = id_value_map
+        self.id_value_map = { k: v&0xffff for k,v in id_value_map.items() }
         for id in id_value_map:
             assert id in AVAILABLE_REGISTERS
 
@@ -452,7 +452,7 @@ BYTE_PAT = '([0-9a-fA-F]{1,2})'
 STR_PAT  = '(".*")'
 
 def int_16(token: str) -> int:
-    return int(token, base=16)
+    return int(token, base=16)&0xffff
 
 def parse_token(token: str, pat, converter=int_16):
     m = re.match(pat, token)
