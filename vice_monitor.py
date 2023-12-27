@@ -461,7 +461,7 @@ def parse_token(token: str, pat, converter=int_16):
         return True, value
     return False, None
 
-def consume_word_token(input_tokens: List[str], default_or_none: None, name: str = '<addr>') -> int:
+def consume_word_token(input_tokens: List[str], default_or_none: None, name: str = '<address>') -> int:
     if input_tokens:
         token = input_tokens.pop(0)
         ok, value = parse_token(token, WORD_PAT, int_16)
@@ -474,7 +474,7 @@ def consume_word_token(input_tokens: List[str], default_or_none: None, name: str
     else:
         raise SyntaxError(f'Please specify a 16-bit hexadecimal number for "{name}"')
 
-def consume_lastaddr_token(input_tokens: List[str], default_or_none: None, name: str = '<lastaddr>', firstaddr: int=0, first_name: str = '<firstaddr>') -> int:
+def consume_lastaddr_token(input_tokens: List[str], default_or_none: None, name: str = '<last-address>', firstaddr: int=0, first_name: str = '<first-address>') -> int:
     lastaddr = consume_word_token(input_tokens, default_or_none, name)
     if lastaddr < firstaddr:
         raise ValueError(f'"{name}" must be greater or equal to "{first_name}"')
@@ -484,8 +484,8 @@ def parse_cmd_m(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
     first = PROMPT_ADDR
     last = PROMPT_ADDR + MEMDUMP_DEFAULT_BYTES - 1
-    first = consume_word_token(input_tokens, first, '<firstaddr>')
-    last = consume_lastaddr_token(input_tokens, first + MEMDUMP_DEFAULT_BYTES - 1, '<lastaddr>', first, '<firstaddr>')
+    first = consume_word_token(input_tokens, first, '<first-address>')
+    last = consume_lastaddr_token(input_tokens, first + MEMDUMP_DEFAULT_BYTES - 1, '<last-address>', first, '<first-address>')
     mem = read_memory(first, last-first+1)
     print(mem)
     PROMPT_ADDR = last + 1
@@ -494,7 +494,7 @@ DISASM_DEFAULT_LINES = 25
 
 def parse_cmd_d(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
-    first = consume_word_token(input_tokens, PROMPT_ADDR, '<addr>')
+    first = consume_word_token(input_tokens, PROMPT_ADDR, '<address>')
     mem = read_memory(first, DISASM_DEFAULT_LINES*3)
     text, remainder = miniasm6502.disasm_blob(first, mem.data, max_lines=DISASM_DEFAULT_LINES)
     print(text)
@@ -505,17 +505,83 @@ def parse_cmd_r(input_tokens: List[str]) -> None:
     print(regs)
 
 def parse_cmd_a(input_tokens: List[str]) -> None:
-    first = consume_word_token(input_tokens, None, '<addr>')
+    first = consume_word_token(input_tokens, None, '<address>')
     first, data = miniasm6502.interactive(first, quit_on_empty_input=True, prefix=' '.join(input_tokens))
     if data:
         write_memory(first, data)
 
+def parse_cmd_wm(input_tokens: List[str]) -> None:
+    global PROMPT_ADDR
+    first = consume_word_token(input_tokens, None, '<address>')
+    cmd_data = []
+    for t in input_tokens:
+        if len(t) > 2:
+            cmd_data.append(np.int16(int(t,base=16)&0xffff))
+        else:
+            cmd_data.append(int(t,base=16)&0xff)
+    if cmd_data:
+        data = data_to_bytes(cmd_data)
+        write_memory(first, data)
+        PROMPT_ADDR = first + len(data)
+
+MONITOR_HELP = """Monitor help:
+
+Commands:
+"""
+
+def parse_cmd_help(input_tokens: List[str]) -> None:
+    print(MONITOR_HELP)
+    for name in COMMAND_PARSERS:
+        _, info, args = COMMAND_PARSERS[name]
+        print(f'{name:<4} {args:30} {info}')
+    print("\nAll numeric operands are assumed to be hexadecimal")
+
+def parse_cmd_s(input_tokens: List[str]) -> None:
+    raise NotImplementedError()
+
+def parse_cmd_g(input_tokens: List[str]) -> None:
+    addr = consume_word_token(input_tokens, None, '<address>')
+    set_registers({"PC": addr})
+    monitor_exit()
+
+def parse_cmd_l(input_tokens: List[str]) -> None:
+    raise NotImplementedError()
+
+def parse_cmd_b(input_tokens: List[str]) -> None:
+    raise NotImplementedError()
+
+def parse_cmd_resume(input_tokens: List[str]) -> None:
+    monitor_exit()
+
 COMMAND_PARSERS = {
-    "m": (parse_cmd_m, "list memory"),
-    "r": (parse_cmd_r, "dump register contents"),
-    "d": (parse_cmd_d, "disassemble memory"),
-    "a": (parse_cmd_a, "assemble to memory"),
+    "x": (None,                 "exit interactive mode and resume emulator", ""),
+    "q": (None,                 "exit interactive mode and quit emulator", ""),
+    "g": (parse_cmd_g,          "go to address", "<address>"),
+    "m": (parse_cmd_m,          "list memory", "[first-address] [last-address]"),
+    "r": (parse_cmd_r,          "dump register contents", ""),
+    "d": (parse_cmd_d,          "disassemble memory", "[address]"),
+    "a": (parse_cmd_a,          "assemble to memory", "<address>"),
+    ">": (parse_cmd_wm,         "write data to memory", "<address> [data] ..."),
+    "s": (parse_cmd_s,          "save memory to disk", '<"filename.prg"> <first-address> <last-address>'),
+    "l": (parse_cmd_l,          "load file to memory", '<"filename.prg"> [load-address]'),
+    "b": (parse_cmd_b,          "set breakpoint", "<address>"),
+    "+": (parse_cmd_resume,     "resume execution in emulator", ""),
+
+    "help": (parse_cmd_help,    "display help", ""),
 }
+
+def tokenize(input: str) -> List[str]:
+    # This is pretty primitive, but works for now
+    tok=[]
+    items = input.split()
+    it = iter(input.split())
+    for t in it:
+        if t.startswith('\"'):
+            while not t.endswith('\"'):
+                t += ' '
+                t += next(it)
+        tok.append(t)
+    return tok
 
 def interactive():
     global PROMPT
@@ -537,17 +603,29 @@ def interactive():
         else:
             if not input:
                 input = prev_command
-            tokens = input.split()
+            tokens = tokenize(input)
             if tokens:
+                # If there is no space between the command and the first operand, find the longest matching command name
+                # and split it from the operand
+                if not tokens[0] in COMMAND_PARSERS:
+                    t = tokens[0]
+                    for i in range(len(t)-1, 0, -1):
+                        if t[:i] in COMMAND_PARSERS:
+                            tokens[0:1] = [ t[:i], t[i:] ]
+                            input = ' '.join(tokens) # In case we have a string token, re-tokenize
+                            tokens = tokenize(input)
+                            break
                 if tokens[0] in COMMAND_PARSERS:
                     try:
-                        parser, _ = COMMAND_PARSERS[tokens[0]]
+                        parser, _, _ = COMMAND_PARSERS[tokens[0]]
                         parser(tokens[1:])
                         prev_command = input
                     except SyntaxError as e:
                         print(e)
                     except ValueError as e:
                         print(e)
+                    except NotImplementedError:
+                        print(f'Command "{tokens[0]}" is not yet implemented.')
                 else:
                     print(f'Unknown command "{tokens[0]}"')
 
