@@ -17,6 +17,7 @@ from typing import List, Dict
 
 sys.path.append(os.path.realpath(os.path.split(sys.argv[0])[0]))
 import miniasm6502
+import psid
 
 VERBOSE = False
 
@@ -24,6 +25,7 @@ VICE_SOCKET = None
 
 PROMPT = "($[PROMPT_ADDR]) "
 PROMPT_ADDR = 0
+BREAK_ADDR = 0
 
 MEMDUMP_DEFAULT_BYTES = 256
 
@@ -364,12 +366,12 @@ class MEMSPACE(Enum):
     MEM_DRV_11 = 4
 
 def read_memory(address: int, count: int = 1, side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> MemDump:
-    cmd_data = [ 1 if side_effects else 0, np.int16(address), np.int16((address + count - 1)&0xffff), memspace.value, np.int16(bankid) ]
+    cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16((address + count - 1)&0xffff), memspace.value, np.uint16(bankid) ]
     response = roundtrip_command(MonCommand.memory_get, cmd_data)
     return MemDump(address, response.body.data[2:])
 
 def write_memory(address: int, data: bytes = b'', side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> Response:
-    cmd_data = [ 1 if side_effects else 0, np.int16(address), np.int16((address + len(data) - 1)&0xffff), memspace.value, np.int16(bankid), data ]
+    cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16((address + len(data) - 1)&0xffff), memspace.value, np.uint16(bankid), data ]
     response = roundtrip_command(MonCommand.memory_set, cmd_data)
     return response
 
@@ -379,7 +381,7 @@ def get_registers_available(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> None:
     cmd_data = [ memspace.value ]
     response = roundtrip_command(MonCommand.registers_available, cmd_data)
     data: bytes = response.body.data
-    item_count = np.frombuffer(data[:2], dtype=np.int16)[0]
+    item_count = np.frombuffer(data[:2], dtype=np.uint16)[0]
     item_offset = 2
     for i in range(0, item_count):
         item_size   = int(data[item_offset + 0])
@@ -397,23 +399,23 @@ def get_registers(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> RegDump:
     cmd_data = [ memspace.value ]
     response = roundtrip_command(MonCommand.registers_get, cmd_data)
     data: bytes = response.body.data
-    item_count = np.frombuffer(data[:2], dtype=np.int16)[0]
+    item_count = np.frombuffer(data[:2], dtype=np.uint16)[0]
     item_offset = 2
     registers = {}
     for i in range(0, item_count):
         item_size   = int(data[item_offset + 0])
         reg_id      = int(data[item_offset + 1])
-        reg_value   = np.frombuffer(data[item_offset + 2:item_offset + 4], dtype=np.int16)[0]
+        reg_value   = np.frombuffer(data[item_offset + 2:item_offset + 4], dtype=np.uint16)[0]
         registers[reg_id] = reg_value
         assert item_size == 3
         item_offset += item_size + 1
     return RegDump(data, registers)
 
 def set_registers(name_value_map: Dict[str, int], memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> Response:
-    cmd_data = [ memspace.value, np.int16(len(name_value_map)) ]
+    cmd_data = [ memspace.value, np.uint16(len(name_value_map)) ]
     for name, value in name_value_map.items():
         id = AVAILABLE_REGISTER_NAMES[name]
-        value = np.int16(value & 0xffff)
+        value = np.uint16(value & 0xffff)
         cmd_data.extend([3, id, value])
     response = roundtrip_command(MonCommand.registers_set, cmd_data)
     return response
@@ -435,17 +437,6 @@ def dumpregs():
     print(regs)
     print()
     return regs
-
-def test():
-    monitor_ping()
-    monitor_exit()
-    mem = read_memory(0xd020,64)
-    print(mem)
-    print()
-    dumpregs()
-    write_memory(0x1000, b'\xee\x20\xd0\x4c\x00\x10')
-    set_registers({'PC': 0x1000})
-    monitor_exit()
 
 WORD_PAT = '([0-9a-fA-F]{1,4})'
 BYTE_PAT = '([0-9a-fA-F]{1,2})'
@@ -479,6 +470,16 @@ def consume_lastaddr_token(input_tokens: List[str], default_or_none: None, name:
     if lastaddr < firstaddr:
         raise ValueError(f'"{name}" must be greater or equal to "{first_name}"')
     return lastaddr
+
+def consume_string_token(input_tokens: List[str], default_or_none: None, name: str='<string>') -> str:
+    if input_tokens:
+        token = input_tokens.pop(0)
+        if token.startswith('"') and token.endswith('"'):
+            return token[1:-1]
+        return token
+    if default_or_none is None:
+        raise SyntaxError(f'Please specify a string value for {name}')
+    return default_or_none
 
 def parse_cmd_m(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
@@ -516,7 +517,7 @@ def parse_cmd_wm(input_tokens: List[str]) -> None:
     cmd_data = []
     for t in input_tokens:
         if len(t) > 2:
-            cmd_data.append(np.int16(int(t,base=16)&0xffff))
+            cmd_data.append(np.uint16(int(t,base=16)&0xffff))
         else:
             cmd_data.append(int(t,base=16)&0xff)
     if cmd_data:
@@ -524,6 +525,30 @@ def parse_cmd_wm(input_tokens: List[str]) -> None:
         write_memory(first, data)
         PROMPT_ADDR = first + len(data)
 
+def load_file(filename:str, load_addr: int = 0, no_header: bool = False):
+    """Load a binary file.
+    
+    Unless the no_header parameter is True, this function interprets .prg and .sid
+    files as if they have a header and only the load address and payload is returned.
+
+    .prg files are assumed to have a 2-byte header that specifies the load address.
+         This can be overridden by specifying a nonzero load address.
+
+    .sid files are assumed to be of the PSID format.
+
+    All other files are assumed to be raw binary files.
+    """
+    with open(filename, 'rb') as infile: data = infile.read()
+    if filename.upper().endswith(".PRG") and not no_header:
+        if load_addr == 0:
+            load_addr = np.frombuffer(data[:2], dtype=np.uint16)
+        return int(load_addr), data[2:]
+    if filename.upper().endswith(".SID") and not no_header:
+        sid = psid.load_sid(filename)
+        print(sid)
+        return load_addr or sid.get_load_address(), sid.get_body()
+    return load_addr, data
+    
 MONITOR_HELP = """Monitor help:
 
 Commands:
@@ -540,12 +565,17 @@ def parse_cmd_s(input_tokens: List[str]) -> None:
     raise NotImplementedError()
 
 def parse_cmd_g(input_tokens: List[str]) -> None:
-    addr = consume_word_token(input_tokens, None, '<address>')
+    global BREAK_ADDR
+    addr = consume_word_token(input_tokens, BREAK_ADDR, '<address>')
     set_registers({"PC": addr})
     monitor_exit()
 
 def parse_cmd_l(input_tokens: List[str]) -> None:
-    raise NotImplementedError()
+    filename = consume_string_token(input_tokens, None, '<filename>')
+    load_addr = consume_word_token(input_tokens, 0, '<load-address>')
+    load_addr, body = load_file(filename, load_addr=load_addr)
+    write_memory(load_addr, body)
+    print(f'Loaded "{os.path.split(filename)[1]}" from ${load_addr:04X} to ${load_addr+len(body)-1:04X}')
 
 def parse_cmd_b(input_tokens: List[str]) -> None:
     raise NotImplementedError()
@@ -556,7 +586,7 @@ def parse_cmd_resume(input_tokens: List[str]) -> None:
 COMMAND_PARSERS = {
     "x": (None,                 "exit interactive mode and resume emulator", ""),
     "q": (None,                 "exit interactive mode and quit emulator", ""),
-    "g": (parse_cmd_g,          "go to address", "<address>"),
+    "g": (parse_cmd_g,          "go (to address)", "[address]"),
     "m": (parse_cmd_m,          "list memory", "[first-address] [last-address]"),
     "r": (parse_cmd_r,          "dump register contents", ""),
     "d": (parse_cmd_d,          "disassemble memory", "[address]"),
@@ -586,8 +616,9 @@ def tokenize(input: str) -> List[str]:
 def interactive():
     global PROMPT
     global PROMPT_ADDR
+    global BREAK_ADDR
     regs = dumpregs()
-    PROMPT_ADDR = regs['PC']
+    BREAK_ADDR = PROMPT_ADDR = regs['PC']
     prev_command = ''
     while True:
         prompt = PROMPT.replace('[PROMPT_ADDR]', f'{PROMPT_ADDR&0xffff:04X}')
@@ -630,7 +661,6 @@ def interactive():
                     print(f'Unknown command "{tokens[0]}"')
 
 def main():
-#    test()
     interactive()
 
 if __name__ == "__main__":
