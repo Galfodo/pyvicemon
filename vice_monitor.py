@@ -548,7 +548,25 @@ def load_file(filename:str, load_addr: int = 0, no_header: bool = False):
         print(sid)
         return load_addr or sid.get_load_address(), sid.get_body()
     return load_addr, data
+
+def save_file(filename:str, data: bytes, first_addr: int, last_addr: int, load_addr: int = 0, no_header: bool = False) -> None:
+    """Save a binary file.
     
+    Unless the no_header parameter is True, this function will will write the load
+    address header (2 bytes) to .prg files. 
+
+    A different load address than first_addr may be specified and if so, the file is
+    always written with the load address header.
+
+    All other files are written as raw binary files.
+    """
+    if filename.upper().endswith(".PRG") and not no_header:
+        load_addr = load_addr or first_addr
+    if load_addr:
+        data = np.uint16(load_addr, dtype='<u2').tobytes() + data
+    with open(filename, 'wb') as outfile: 
+        outfile.write(data)
+
 MONITOR_HELP = """Monitor help:
 
 Commands:
@@ -562,7 +580,14 @@ def parse_cmd_help(input_tokens: List[str]) -> None:
     print("\nAll numeric operands are assumed to be hexadecimal")
 
 def parse_cmd_s(input_tokens: List[str]) -> None:
-    raise NotImplementedError()
+    filename = consume_string_token(input_tokens, None, '<filename>')
+    first = consume_word_token(input_tokens, None, '<first-address>')
+    last = consume_lastaddr_token(input_tokens, None, '<last-address>', first, '<first-address>')
+    load = consume_word_token(input_tokens, 0, '<load-address>')
+    mem = read_memory(first, last-first+1)
+    save_file(filename, mem.data, first, last, load)
+    extra = f', load address: ${load:04X}' if load else ''
+    print(f'Saved "{os.path.split(filename)[1]}" from ${first:04X} to ${first+len(mem.data)-1:04X}{extra}')
 
 def parse_cmd_g(input_tokens: List[str]) -> None:
     global BREAK_ADDR
