@@ -20,23 +20,26 @@ Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.
 ```
 ## Interactive monitor commands:
 ```
- x                                                                 exit interactive mode and resume emulator
- q                                                                 exit interactive mode and quit emulator
- g    [address]                                                    go (to address)
- m    [first-address] [last-address]                               list memory
- r                                                                 dump register contents
- d    [address]                                                    disassemble memory
- a    <address>                                                    assemble to memory
- >    <address> [data] ...                                         write data to memory
- s    <filename.prg> <first-address> <last-address> [load-address] save memory to disk
- l    <filename.prg> [load-address]                                load file to memory
- b    <address>                                                    set breakpoint
- help                                                              display help
+x                                                                 exit interactive mode and resume emulator
+q                                                                 exit interactive mode and quit emulator
+g    [address]                                                    go (to address)
+m    [first-address] [last-address]                               list memory
+r                                                                 dump register contents
+d    [address]                                                    disassemble memory
+a    <address>                                                    assemble to memory
+>    <address> [data] ...                                         write data to memory
+s    <filename.prg> <first-address> <last-address> [load-address] save memory to disk
+l    <filename.prg> [load-address]                                load file to memory
+b    <first-address> [last-address]                               set execution breakpoint
+br   <first-address> [last-address]                               set data breakpoint (read)
+bw   <first-address> [last-address]                               set data breakpoint (write)
+c    [timeout (seconds, decimal)]                                 continue and wait for debugger event
+help                                                              display help
 
-All numeric operands are assumed to be hexadecimal
+All numeric operands are assumed to be hexadecimal unless otherwise specified
 ```
 ## TODO:
-* breakpoints
+* breakpoint conditions/python evaluators
 * modify registers
 * fill memory
 * find
