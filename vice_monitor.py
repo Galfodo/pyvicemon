@@ -699,59 +699,6 @@ def save_file(filename:str, data: bytes, first_addr: int, last_addr: int, load_a
     with open(filename, 'wb') as outfile: 
         outfile.write(data)
 
-MONITOR_HELP = """Monitor help:
-
-Commands:
-"""
-
-def parse_cmd_help(input_tokens: List[str]) -> None:
-    print(MONITOR_HELP)
-    for name in COMMAND_PARSERS:
-        _, info, args = COMMAND_PARSERS[name]
-        print(f'{name:<4} {args:60} {info}')
-    print("\nAll numeric operands are assumed to be hexadecimal")
-
-def parse_cmd_s(input_tokens: List[str]) -> None:
-    filename = consume_string_token(input_tokens, None, '<filename>')
-    first = consume_word_token(input_tokens, None, '<first-address>')
-    last = consume_lastaddr_token(input_tokens, None, '<last-address>', first, '<first-address>')
-    load = consume_word_token(input_tokens, 0, '<load-address>')
-    mem = read_memory(first, last)
-    save_file(filename, mem.data, first, last, load)
-    extra = f', load address: ${load:04X}' if load else ''
-    print(f'Saved "{os.path.split(filename)[1]}" from ${first:04X} to ${first+len(mem.data)-1:04X}{extra}')
-
-def parse_cmd_g(input_tokens: List[str]) -> None:
-    global BREAK_ADDR
-    addr = consume_word_token(input_tokens, BREAK_ADDR, '<address>')
-    set_registers({"PC": addr})
-    monitor_exit()
-
-def parse_cmd_l(input_tokens: List[str]) -> None:
-    filename = consume_string_token(input_tokens, None, '<filename>')
-    load_addr = consume_word_token(input_tokens, 0, '<load-address>')
-    load_addr, body = load_file(filename, load_addr=load_addr)
-    write_memory(load_addr, body)
-    print(f'Loaded "{os.path.split(filename)[1]}" from ${load_addr:04X} to ${load_addr+len(body)-1:04X}')
-
-def parse_cmd_break(input_tokens: List[str], mode: BreakPointMode):
-    first_addr = consume_word_token(input_tokens, None, '<address>')
-    last_addr = consume_lastaddr_token(input_tokens, first_addr, "<last-address>", first_addr, "<first-address")
-    condition = consume_string_token(input_tokens, '', "<condition>")
-    set_breakpoint(first_addr, last_addr, mode=mode, condition=condition)
-
-def parse_cmd_b(input_tokens: List[str]) -> None:
-    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_EXEC)
-
-def parse_cmd_br(input_tokens: List[str]) -> None:
-    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_LOAD)
-
-def parse_cmd_bw(input_tokens: List[str]) -> None:
-    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_STORE)
-
-def parse_cmd_resume(input_tokens: List[str]) -> None:
-    monitor_exit()
-
 def wait_for_debugger_event(timeout: Union[float,None] = None):
     """Resume the emulator and wait for a debugger event.
 
@@ -792,6 +739,60 @@ def wait_for_debugger_event(timeout: Union[float,None] = None):
     finally:
         sock.settimeout(socket_timeout)
 
+MONITOR_HELP = """Monitor help:
+
+Commands:
+"""
+
+def parse_cmd_help(input_tokens: List[str]) -> None:
+    print(MONITOR_HELP)
+    for name in COMMAND_PARSERS:
+        _, info, args = COMMAND_PARSERS[name]
+        print(f'{name:<4} {args:60} {info}')
+    print("\nAll numeric operands are assumed to be hexadecimal unless otherwise specified")
+
+def parse_cmd_s(input_tokens: List[str]) -> None:
+    filename = consume_string_token(input_tokens, None, '<filename>')
+    first = consume_word_token(input_tokens, None, '<first-address>')
+    last = consume_lastaddr_token(input_tokens, None, '<last-address>', first, '<first-address>')
+    load = consume_word_token(input_tokens, 0, '<load-address>')
+    mem = read_memory(first, last)
+    save_file(filename, mem.data, first, last, load)
+    extra = f', load address: ${load:04X}' if load else ''
+    print(f'Saved "{os.path.split(filename)[1]}" from ${first:04X} to ${first+len(mem.data)-1:04X}{extra}')
+
+def parse_cmd_g(input_tokens: List[str]) -> None:
+    global BREAK_ADDR
+    addr = consume_word_token(input_tokens, BREAK_ADDR, '<address>')
+    if addr != BREAK_ADDR:
+        set_registers({"PC": addr})
+    monitor_exit()
+
+def parse_cmd_l(input_tokens: List[str]) -> None:
+    filename = consume_string_token(input_tokens, None, '<filename>')
+    load_addr = consume_word_token(input_tokens, 0, '<load-address>')
+    load_addr, body = load_file(filename, load_addr=load_addr)
+    write_memory(load_addr, body)
+    print(f'Loaded "{os.path.split(filename)[1]}" from ${load_addr:04X} to ${load_addr+len(body)-1:04X}')
+
+def parse_cmd_break(input_tokens: List[str], mode: BreakPointMode):
+    first_addr = consume_word_token(input_tokens, None, '<address>')
+    last_addr = consume_lastaddr_token(input_tokens, first_addr, "<last-address>", first_addr, "<first-address")
+    condition = consume_string_token(input_tokens, '', "<condition>")
+    set_breakpoint(first_addr, last_addr, mode=mode, condition=condition)
+
+def parse_cmd_b(input_tokens: List[str]) -> None:
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_EXEC)
+
+def parse_cmd_br(input_tokens: List[str]) -> None:
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_LOAD)
+
+def parse_cmd_bw(input_tokens: List[str]) -> None:
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_STORE)
+
+def parse_cmd_resume(input_tokens: List[str]) -> None:
+    monitor_exit()
+
 def parse_cmd_c(input_tokens: List[str]) -> None:
     timeout_value = consume_float_token(input_tokens, -1.0, '<timeout>')
     wait_for_debugger_event(timeout_value if timeout_value >= 0 else None)
@@ -819,7 +820,7 @@ COMMAND_PARSERS = {
     "br":(parse_cmd_br,         "set data breakpoint (read)", "<first-address> [last-address]"),
     "bw":(parse_cmd_bw,         "set data breakpoint (write)", "<first-address> [last-address]"),
 
-    "c": (parse_cmd_c,          "continue and wait for debugger event", "[timeout]"),
+    "c": (parse_cmd_c,          "continue and wait for debugger event", "[timeout (seconds, decimal)]"),
 
     "help": (parse_cmd_help,    "display help", ""),
 }
