@@ -172,7 +172,7 @@ class SessionLogger(object):
 SESSION_LOGGER = sys.stdin
 
 # Global response queue
-RESPONSE_QUEUE = []
+RESPONSE_QUEUE: List['Response'] = []
 
 # Global request ID. Incremented by Command.__init__()
 REQUEST_ID = 0
@@ -259,6 +259,53 @@ class MemDump(Body):
         prefixes = [ f'{self.address + i*chunk_size:04X}:' for i in range(0, len(lines)) ]
         return '\n'.join([ prefix + data for prefix, data in zip(prefixes, lines) ])
 
+BreakPointInfo_dtype = np.dtype([
+    ('checkpoint_number',   '<u4'),
+    ('currently_hit',       'u1'),
+    ('start_address',       '<u2'),
+    ('end_address',         '<u2'),
+    ('stop_when_hit',       'u1'),
+    ('enabled',             'u1'),
+    ('CPU_operation',       'u1'),
+    ('temporary',           'u1'),
+    ('hit_count',           '<u4'),
+    ('ignore_count',        '<u4'),
+    ('has_condition',       'u1'),
+    ('memspace',            'u1'),
+])
+
+class BreakPointInfo(Body):
+    def __init__(self, data=b''):
+        super().__init__(data)
+        self.info = np.frombuffer(data, BreakPointInfo_dtype)
+
+    def verbose_info(self) -> str:
+        lines = []
+        fields = sorted(BreakPointInfo_dtype.fields.items(), key = lambda x: x[1][1])
+        for field, type_ in fields:
+            value = repr(self.info[field][0])
+            lines.append(f'{field:<20}: {value}')
+        return '\n'.join(lines)
+
+    def __repr__(self):
+        start, end = self.addr_range
+        if start == end:
+            return f'BreakPointInfo(id={self.id}, addr=${start:04X}, mode={self.mode.name})'
+        else:
+            return f'BreakPointInfo(id={self.id}, addr=${start:04X}-${end:04X}, mode={self.mode.name})'
+
+    @property
+    def mode(self):
+        return BreakPointMode(self.info['CPU_operation'])
+    
+    @property
+    def id(self):
+        return int(self.info['checkpoint_number'])
+    
+    @property
+    def addr_range(self):
+        return (int(self.info['start_address']), int(self.info['end_address']))
+
 def data_to_bytes(data = []):
     b = b''
     for i in data:
@@ -268,6 +315,8 @@ def data_to_bytes(data = []):
             b += bytes((i.value,))
         elif isinstance(i, bytes):
             b += i
+        elif isinstance(i, bool):
+            b += bytes((1 if i else 0,))
         else:
             b += i.tobytes()
     return b
@@ -279,7 +328,10 @@ class Response(object):
 
     def is_command_invalid(self):
         return self.header['response_type'] == MonResponse.MON_RESPONSE_INVALID.value
-    
+
+    def get_response_type(self):
+        return MonResponse(self.header['response_type'])
+
     def get_request_id(self):
         return int(self.header['request_id'])
     
@@ -485,8 +537,20 @@ def monitor_exit():
 def monitor_quit():
     return roundtrip_command(MonCommand.quit)
 
-def set_breakpoint(first_addr: int, last_addr: int=-1, mode: BreakPointMode=BreakPointMode.BREAK_EXEC, condition: str=''):
-    raise NotImplementedError()
+def set_breakpoint(
+        first_addr: int, 
+        last_addr: int=-1, 
+        mode: BreakPointMode=BreakPointMode.BREAK_EXEC, 
+        is_enabled: bool=True,
+        stop_when_hit: bool=True,
+        is_temporary: bool=False, 
+        memspace: MemSpace=MemSpace.MEM_MAIN, 
+        condition: str=''):
+    cmd_data = [np.uint16(first_addr), np.uint16(last_addr), is_enabled, stop_when_hit, mode, is_temporary, memspace]
+    response = roundtrip_command(MonCommand.checkpoint_set, cmd_data)
+    print(BreakPointInfo(response.body.data))
+    if condition:
+        raise NotImplementedError("breakpoint condition")
 
 def dumpregs():
     regs = get_registers()
@@ -670,8 +734,20 @@ def parse_cmd_l(input_tokens: List[str]) -> None:
     write_memory(load_addr, body)
     print(f'Loaded "{os.path.split(filename)[1]}" from ${load_addr:04X} to ${load_addr+len(body)-1:04X}')
 
+def parse_cmd_break(input_tokens: List[str], mode: BreakPointMode):
+    first_addr = consume_word_token(input_tokens, None, '<address>')
+    last_addr = consume_lastaddr_token(input_tokens, first_addr, "<last-address>", first_addr, "<first-address")
+    condition = consume_string_token(input_tokens, '', "<condition>")
+    set_breakpoint(first_addr, last_addr, mode=mode, condition=condition)
+
 def parse_cmd_b(input_tokens: List[str]) -> None:
-    raise NotImplementedError()
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_EXEC)
+
+def parse_cmd_br(input_tokens: List[str]) -> None:
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_LOAD)
+
+def parse_cmd_bw(input_tokens: List[str]) -> None:
+    return parse_cmd_break(input_tokens, BreakPointMode.BREAK_STORE)
 
 def parse_cmd_resume(input_tokens: List[str]) -> None:
     monitor_exit()
@@ -708,12 +784,10 @@ def wait_for_debugger_event(timeout: Union[float,None] = None):
                 continue
             if target_time and target_time < time.time():
                 print('[Timeout]')
-                dumpregs()
                 RESPONSE_QUEUE.clear()
                 break
     except KeyboardInterrupt:
         print('[User Break]')
-        dumpregs()
         RESPONSE_QUEUE.clear()
     finally:
         sock.settimeout(socket_timeout)
@@ -722,7 +796,13 @@ def parse_cmd_c(input_tokens: List[str]) -> None:
     timeout_value = consume_float_token(input_tokens, -1.0, '<timeout>')
     wait_for_debugger_event(timeout_value if timeout_value >= 0 else None)
     for r in RESPONSE_QUEUE:
-        print(r)
+        if r.get_response_type() == MonResponse.MON_RESPONSE_CHECKPOINT_GET:
+            print('[Breakpoint Hit]')
+            print(BreakPointInfo(r.body.data))
+        else:
+            print('Unexpected response:')
+            print(r)
+    dumpregs()
 
 COMMAND_PARSERS = {
     "x": (None,                 "exit interactive mode and resume emulator", ""),
@@ -735,7 +815,10 @@ COMMAND_PARSERS = {
     ">": (parse_cmd_wm,         "write data to memory", "<address> [data] ..."),
     "s": (parse_cmd_s,          "save memory to disk", '<filename.prg> <first-address> <last-address> [load-address]'),
     "l": (parse_cmd_l,          "load file to memory", '<filename.prg> [load-address]'),
-    "b": (parse_cmd_b,          "set breakpoint", "<address>"),
+    "b": (parse_cmd_b,          "set execution breakpoint", "<first-address> [last-address]"),
+    "br":(parse_cmd_br,         "set data breakpoint (read)", "<first-address> [last-address]"),
+    "bw":(parse_cmd_bw,         "set data breakpoint (write)", "<first-address> [last-address]"),
+
     "c": (parse_cmd_c,          "continue and wait for debugger event", "[timeout]"),
 
     "help": (parse_cmd_help,    "display help", ""),
