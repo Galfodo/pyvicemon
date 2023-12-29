@@ -12,9 +12,11 @@ import re
 import socket
 import select
 import argparse
+import time
 import numpy as np
-from enum import Enum
-from typing import List, Dict, Callable
+from enum import Enum, IntEnum, IntFlag
+
+from typing import List, Dict, Union
 
 sys.path.append(os.path.realpath(os.path.split(sys.argv[0])[0]))
 import miniasm6502
@@ -46,7 +48,7 @@ RECV_BUFFER_SIZE = 100000
 AVAILABLE_REGISTERS = {} # id: ('name', bit-size)
 AVAILABLE_REGISTER_NAMES = {} # 'name': id
 
-class MonCommand(Enum):
+class MonCommand(IntEnum):
     memory_get              = 0x01
     memory_set              = 0x02
     checkpoint_get          = 0x11
@@ -77,7 +79,7 @@ class MonCommand(Enum):
     reset                   = 0xcc
     autostart               = 0xdd
 
-class MonResponse(Enum):
+class MonResponse(IntEnum):
     MON_RESPONSE_MEMORY_GET              = 0x01
     MON_RESPONSE_MEMORY_SET              = 0x02
     MON_RESPONSE_CHECKPOINT_GET          = 0x11
@@ -110,6 +112,18 @@ class MonResponse(Enum):
     MON_RESPONSE_JAM                     = 0x61
     MON_RESPONSE_STOPPED                 = 0x62    
     MON_RESPONSE_RESUMED                 = 0x63        
+
+class MemSpace(IntEnum):
+    MEM_MAIN = 0
+    MEM_DRV_8 = 1
+    MEM_DRV_9 = 2
+    MEM_DRV_10 = 3
+    MEM_DRV_11 = 4
+
+class BreakPointMode(IntFlag):
+    BREAK_LOAD = 1
+    BREAK_STORE = 2
+    BREAK_EXEC = 4
 
 class SessionLogger(object):
     def __init__(self, infile: str = '', outfile: str = ''):
@@ -352,7 +366,7 @@ def parse_response(blob):
         blob = remainder[body_size:]
     yield None
 
-def handle_response() -> None:
+def await_response() -> None:
     """Receive data from the socket, parse it and put responses on the global RESPONSE_QUEUE"""
     packages = []
     resp = get_socket().recv(RECV_BUFFER_SIZE)
@@ -394,37 +408,30 @@ def pop_response(request_id: int) -> MonResponse:
             return RESPONSE_QUEUE.pop(i)
     raise ResponseNotFound(f'request_id: {request_id}')
 
-def roundtrip_command(cmd: MonCommand, cmd_data: List=[], await_response=True) -> MonResponse:
+def roundtrip_command(cmd: MonCommand, cmd_data: List=[], blocking=True) -> MonResponse:
     command = create_command(cmd, cmd_data)
     send_command(command)
     request_id = command.get_request_id()
-    while await_response:
+    while blocking:
         try:
-            handle_response()
+            await_response()
             return pop_response(request_id)
         except ResponseNotFound:
             pass
 
-class MEMSPACE(Enum):
-    MEM_MAIN = 0
-    MEM_DRV_8 = 1
-    MEM_DRV_9 = 2
-    MEM_DRV_10 = 3
-    MEM_DRV_11 = 4
-
-def read_memory(first_addr: int, last_addr: int, side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> MemDump:
+def read_memory(first_addr: int, last_addr: int, side_effects: bool = False, memspace: MemSpace = MemSpace.MEM_MAIN, bankid: int = 0) -> MemDump:
     cmd_data = [ 1 if side_effects else 0, np.uint16(first_addr), np.uint16(min(last_addr, 0xffff)), memspace.value, np.uint16(bankid) ]
     response = roundtrip_command(MonCommand.memory_get, cmd_data)
     return MemDump(first_addr, response.body.data[2:])
 
-def write_memory(address: int, data: bytes = b'', side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> Response:
+def write_memory(address: int, data: bytes = b'', side_effects: bool = False, memspace: MemSpace = MemSpace.MEM_MAIN, bankid: int = 0) -> Response:
     last_addr = min(address + len(data) - 1, 0xffff)
     data_size = last_addr - address + 1
     cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16(last_addr), memspace.value, np.uint16(bankid), data[:data_size] ]
     response = roundtrip_command(MonCommand.memory_set, cmd_data)
     return response
 
-def get_registers_available(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> None:
+def get_registers_available(memspace: MemSpace = MemSpace.MEM_MAIN) -> None:
     AVAILABLE_REGISTERS.clear()
     AVAILABLE_REGISTER_NAMES.clear()
     cmd_data = [ memspace.value ]
@@ -442,7 +449,7 @@ def get_registers_available(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> None:
         AVAILABLE_REGISTER_NAMES[reg_name] = reg_id
         item_offset += item_size + 1
 
-def get_registers(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> RegDump:
+def get_registers(memspace: MemSpace = MemSpace.MEM_MAIN) -> RegDump:
     if not AVAILABLE_REGISTERS:
         get_registers_available()
     cmd_data = [ memspace.value ]
@@ -460,7 +467,7 @@ def get_registers(memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> RegDump:
         item_offset += item_size + 1
     return RegDump(data, registers)
 
-def set_registers(name_value_map: Dict[str, int], memspace: MEMSPACE = MEMSPACE.MEM_MAIN) -> Response:
+def set_registers(name_value_map: Dict[str, int], memspace: MemSpace = MemSpace.MEM_MAIN) -> Response:
     cmd_data = [ memspace.value, np.uint16(len(name_value_map)) ]
     for name, value in name_value_map.items():
         id = AVAILABLE_REGISTER_NAMES[name]
@@ -478,8 +485,8 @@ def monitor_exit():
 def monitor_quit():
     return roundtrip_command(MonCommand.quit)
 
-while response_pending():
-    handle_response()
+def set_breakpoint(first_addr: int, last_addr: int=-1, mode: BreakPointMode=BreakPointMode.BREAK_EXEC, condition: str=''):
+    raise NotImplementedError()
 
 def dumpregs():
     regs = get_registers()
@@ -519,6 +526,18 @@ def consume_lastaddr_token(input_tokens: List[str], default_or_none: None, name:
     if lastaddr < firstaddr:
         raise ValueError(f'"{name}" must be greater or equal to "{first_name}"')
     return lastaddr
+
+def consume_float_token(input_tokens: List[str], default_or_none: None, name: str='<float>') -> float:
+    if input_tokens:
+        token = input_tokens.pop(0)
+        try:
+            value = float(token)
+            return value
+        except:
+            pass
+    if default_or_none is None:
+        raise SyntaxError(f'Please specify a string value for {name}')
+    return default_or_none
 
 def consume_string_token(input_tokens: List[str], default_or_none: None, name: str='<string>') -> str:
     if input_tokens:
@@ -657,6 +676,54 @@ def parse_cmd_b(input_tokens: List[str]) -> None:
 def parse_cmd_resume(input_tokens: List[str]) -> None:
     monitor_exit()
 
+def wait_for_debugger_event(timeout: Union[float,None] = None):
+    """Resume the emulator and wait for a debugger event.
+
+    A timeout may be specified, but the user can also break and pause
+    the emulator by pressing Ctrl-C
+    """
+    target_time = time.time() + timeout if timeout else 0
+    global RESPONSE_QUEUE
+    monitor_exit()
+    while response_pending():
+        await_response()
+    sock = get_socket()
+    socket_timeout = sock.gettimeout()
+    try:
+        # We set a short timeout so that users can choose to break because
+        # if the socket is set to blocking, we can not catch Ctrl-C until
+        # socket.recv() returns.
+        sock.settimeout(1.0)
+        RESPONSE_QUEUE.clear()
+        while True:
+            try:
+                await_response()
+            except socket.timeout:
+                pass
+            except TimeoutError:
+                pass
+            if len(RESPONSE_QUEUE):
+                break
+            if timeout is None:
+                continue
+            if target_time and target_time < time.time():
+                print('[Timeout]')
+                dumpregs()
+                RESPONSE_QUEUE.clear()
+                break
+    except KeyboardInterrupt:
+        print('[User Break]')
+        dumpregs()
+        RESPONSE_QUEUE.clear()
+    finally:
+        sock.settimeout(socket_timeout)
+
+def parse_cmd_c(input_tokens: List[str]) -> None:
+    timeout_value = consume_float_token(input_tokens, -1.0, '<timeout>')
+    wait_for_debugger_event(timeout_value if timeout_value >= 0 else None)
+    for r in RESPONSE_QUEUE:
+        print(r)
+
 COMMAND_PARSERS = {
     "x": (None,                 "exit interactive mode and resume emulator", ""),
     "q": (None,                 "exit interactive mode and quit emulator", ""),
@@ -669,7 +736,7 @@ COMMAND_PARSERS = {
     "s": (parse_cmd_s,          "save memory to disk", '<filename.prg> <first-address> <last-address> [load-address]'),
     "l": (parse_cmd_l,          "load file to memory", '<filename.prg> [load-address]'),
     "b": (parse_cmd_b,          "set breakpoint", "<address>"),
-#    "+": (parse_cmd_resume,     "resume execution in emulator", ""),
+    "c": (parse_cmd_c,          "continue and wait for debugger event", "[timeout]"),
 
     "help": (parse_cmd_help,    "display help", ""),
 }
