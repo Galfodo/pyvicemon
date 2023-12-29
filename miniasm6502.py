@@ -243,7 +243,7 @@ def asm_line(current_addr: int, line: str) -> bytes:
                         return bytes((op_modes[AddrMode.IZY], intvalue&0xff))
     return None
 
-def interactive(addr=0x1000, quit_on_empty_input=False, no_termcodes=False, prefix='') -> Tuple[int, bytes]:
+def interactive(addr=0x1000, quit_on_empty_input=False, no_termcodes=False, prefix='', input_stream=sys.stdin) -> Tuple[int, bytes]:
     """Start interactive mode.
     
     Assembles lines of code entered by the user until the Quit ('q') or Exit ('x')
@@ -261,7 +261,10 @@ def interactive(addr=0x1000, quit_on_empty_input=False, no_termcodes=False, pref
             l = prefix
             prefix = ''
         else:
-            l = sys.stdin.readline().strip().upper()
+            l = input_stream.readline()
+            if l == '': # EOF
+                break
+        l = l.strip().upper()
         if l == 'X' or l == 'Q':
             break
         if l.startswith('A'):

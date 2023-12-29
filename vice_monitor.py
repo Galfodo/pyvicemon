@@ -11,9 +11,10 @@ import sys
 import re
 import socket
 import select
+import argparse
 import numpy as np
 from enum import Enum
-from typing import List, Dict
+from typing import List, Dict, Callable
 
 sys.path.append(os.path.realpath(os.path.split(sys.argv[0])[0]))
 import miniasm6502
@@ -109,6 +110,52 @@ class MonResponse(Enum):
     MON_RESPONSE_JAM                     = 0x61
     MON_RESPONSE_STOPPED                 = 0x62    
     MON_RESPONSE_RESUMED                 = 0x63        
+
+class SessionLogger(object):
+    def __init__(self, infile: str = '', outfile: str = ''):
+        global SESSION_LOGGER
+        assert SESSION_LOGGER
+        self.infile = infile
+        self.outfile = outfile
+        self.restart = True
+        self.lines = []
+        if self.infile:
+            with open(self.infile, 'r') as input:
+                self.lines = input.readlines()
+        self.prev_logger = SESSION_LOGGER
+        SESSION_LOGGER = self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global SESSION_LOGGER
+        SESSION_LOGGER = self.prev_logger
+
+    def readline(self) -> str:
+        if self.lines:
+            line = self.lines.pop(0)
+            print(line, end='')
+        else:
+            line = self.prev_logger.readline()
+        lines = []
+        if self.restart:
+            self.restart = False
+        elif self.outfile:
+            try:
+                with open(self.outfile, 'r') as input:
+                    lines = input.readlines()
+            except:
+                pass
+        if line != 'x\n' and line != 'q\n': # We don't want these in the session file
+            lines.append(line)
+        if self.outfile:
+            with open(self.outfile, 'w') as outfile:
+                outfile.writelines(lines)
+        return line
+
+# Session logger/playback
+SESSION_LOGGER = sys.stdin
 
 # Global response queue
 RESPONSE_QUEUE = []
@@ -507,7 +554,7 @@ def parse_cmd_r(input_tokens: List[str]) -> None:
 
 def parse_cmd_a(input_tokens: List[str]) -> None:
     first = consume_word_token(input_tokens, None, '<address>')
-    first, data = miniasm6502.interactive(first, quit_on_empty_input=True, prefix=' '.join(input_tokens))
+    first, data = miniasm6502.interactive(first, quit_on_empty_input=True, prefix=' '.join(input_tokens), input_stream=SESSION_LOGGER)
     if data:
         write_memory(first, data)
 
@@ -576,7 +623,7 @@ def parse_cmd_help(input_tokens: List[str]) -> None:
     print(MONITOR_HELP)
     for name in COMMAND_PARSERS:
         _, info, args = COMMAND_PARSERS[name]
-        print(f'{name:<4} {args:30} {info}')
+        print(f'{name:<4} {args:60} {info}')
     print("\nAll numeric operands are assumed to be hexadecimal")
 
 def parse_cmd_s(input_tokens: List[str]) -> None:
@@ -617,10 +664,10 @@ COMMAND_PARSERS = {
     "d": (parse_cmd_d,          "disassemble memory", "[address]"),
     "a": (parse_cmd_a,          "assemble to memory", "<address>"),
     ">": (parse_cmd_wm,         "write data to memory", "<address> [data] ..."),
-    "s": (parse_cmd_s,          "save memory to disk", '<"filename.prg"> <first-address> <last-address>'),
-    "l": (parse_cmd_l,          "load file to memory", '<"filename.prg"> [load-address]'),
+    "s": (parse_cmd_s,          "save memory to disk", '<filename.prg> <first-address> <last-address> [load-address]'),
+    "l": (parse_cmd_l,          "load file to memory", '<filename.prg> [load-address]'),
     "b": (parse_cmd_b,          "set breakpoint", "<address>"),
-    "+": (parse_cmd_resume,     "resume execution in emulator", ""),
+#    "+": (parse_cmd_resume,     "resume execution in emulator", ""),
 
     "help": (parse_cmd_help,    "display help", ""),
 }
@@ -642,23 +689,25 @@ def interactive():
     global PROMPT
     global PROMPT_ADDR
     global BREAK_ADDR
+    global SESSION_LOGGER
+    assert SESSION_LOGGER
+    input_stream = SESSION_LOGGER
     regs = dumpregs()
     BREAK_ADDR = PROMPT_ADDR = regs['PC']
-    prev_command = ''
     while True:
         prompt = PROMPT.replace('[PROMPT_ADDR]', f'{PROMPT_ADDR&0xffff:04X}')
         print(prompt, end='')
         sys.stdout.flush()
-        input = sys.stdin.readline().strip()
+        input = input_stream.readline()
+        if input == '': # EOF
+            return None
+        input = input.strip()
         if input == 'q':
             monitor_quit()
             return None
         elif input == 'x':
-            monitor_exit()
             return None
         else:
-            if not input:
-                input = prev_command
             tokens = tokenize(input)
             if tokens:
                 # If there is no space between the command and the first operand, find the longest matching command name
@@ -675,7 +724,6 @@ def interactive():
                     try:
                         parser, _, _ = COMMAND_PARSERS[tokens[0]]
                         parser(tokens[1:])
-                        prev_command = input
                     except SyntaxError as e:
                         print(e)
                     except ValueError as e:
@@ -685,8 +733,44 @@ def interactive():
                 else:
                     print(f'Unknown command "{tokens[0]}"')
 
-def main():
-    interactive()
+def main(argv):
+    global SESSION_LOGGER
+    parser = argparse.ArgumentParser(
+        description='Remote machine language monitor for VICE. Start VICE with -binarymonitor.'
+    )
+    parser.add_argument("-s", "--session", 
+        type=str,
+        help='Playback session'
+    )
+    parser.add_argument("-r", "--record",
+        type=str,
+        help="Record session to file."
+    )
+    parser.add_argument("-i", "--interactive",
+        action='store_true',
+        help='Enter interactive mode. This is the default if no commands are specified.')
+    parser.add_argument("--monitor-help",
+        action='store_true',
+        help='List monitor commands.'
+    )
+    args, _ = parser.parse_known_args(args=argv)
+    if args.record and args.session:
+        with SessionLogger(outfile=args.record, infile=args.session):
+            interactive()
+        return
+    elif args.session:
+        with SessionLogger(infile=args.session):
+            interactive()
+    elif args.record:
+        with SessionLogger(outfile=args.record):
+            interactive()
+    elif args.monitor_help:
+        parse_cmd_help([])
+    else:
+        interactive()
+        return
+    if args.interactive:
+        interactive()
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)
