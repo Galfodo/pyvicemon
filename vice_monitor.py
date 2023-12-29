@@ -412,13 +412,15 @@ class MEMSPACE(Enum):
     MEM_DRV_10 = 3
     MEM_DRV_11 = 4
 
-def read_memory(address: int, count: int = 1, side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> MemDump:
-    cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16((address + count - 1)&0xffff), memspace.value, np.uint16(bankid) ]
+def read_memory(first_addr: int, last_addr: int, side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> MemDump:
+    cmd_data = [ 1 if side_effects else 0, np.uint16(first_addr), np.uint16(min(last_addr, 0xffff)), memspace.value, np.uint16(bankid) ]
     response = roundtrip_command(MonCommand.memory_get, cmd_data)
-    return MemDump(address, response.body.data[2:])
+    return MemDump(first_addr, response.body.data[2:])
 
 def write_memory(address: int, data: bytes = b'', side_effects: bool = False, memspace: MEMSPACE = MEMSPACE.MEM_MAIN, bankid: int = 0) -> Response:
-    cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16((address + len(data) - 1)&0xffff), memspace.value, np.uint16(bankid), data ]
+    last_addr = min(address + len(data) - 1, 0xffff)
+    data_size = last_addr - address + 1
+    cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16(last_addr), memspace.value, np.uint16(bankid), data[:data_size] ]
     response = roundtrip_command(MonCommand.memory_set, cmd_data)
     return response
 
@@ -534,7 +536,7 @@ def parse_cmd_m(input_tokens: List[str]) -> None:
     last = PROMPT_ADDR + MEMDUMP_DEFAULT_BYTES - 1
     first = consume_word_token(input_tokens, first, '<first-address>')
     last = consume_lastaddr_token(input_tokens, first + MEMDUMP_DEFAULT_BYTES - 1, '<last-address>', first, '<first-address>')
-    mem = read_memory(first, last-first+1)
+    mem = read_memory(first, last)
     print(mem)
     PROMPT_ADDR = last + 1
 
@@ -543,7 +545,7 @@ DISASM_DEFAULT_LINES = 25
 def parse_cmd_d(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
     first = consume_word_token(input_tokens, PROMPT_ADDR, '<address>')
-    mem = read_memory(first, DISASM_DEFAULT_LINES*3)
+    mem = read_memory(first, first+DISASM_DEFAULT_LINES*3)
     text, remainder = miniasm6502.disasm_blob(first, mem.data, max_lines=DISASM_DEFAULT_LINES)
     print(text)
     PROMPT_ADDR = first + len(mem.data) - len(remainder)
@@ -631,7 +633,7 @@ def parse_cmd_s(input_tokens: List[str]) -> None:
     first = consume_word_token(input_tokens, None, '<first-address>')
     last = consume_lastaddr_token(input_tokens, None, '<last-address>', first, '<first-address>')
     load = consume_word_token(input_tokens, 0, '<load-address>')
-    mem = read_memory(first, last-first+1)
+    mem = read_memory(first, last)
     save_file(filename, mem.data, first, last, load)
     extra = f', load address: ${load:04X}' if load else ''
     print(f'Saved "{os.path.split(filename)[1]}" from ${first:04X} to ${first+len(mem.data)-1:04X}{extra}')
