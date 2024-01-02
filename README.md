@@ -11,6 +11,7 @@ fashion.
 ## Files:
 * vice_monitor.py - The monitor program
 * miniasm6502.py - Standalone interactive assembler + disassembler, used by the monitor
+* psid.py - For reading .sid files
 
 ## Command line arguments:
 ```
