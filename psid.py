@@ -81,7 +81,6 @@ class SID(object):
         return self.data[data_offset:]
     
     def get_load_address(self) -> int:
-        loadAddr = playAddr = initAddr = 0x10000
         if self.header['loadAddress']:
             loadAddr = int(self.header['loadAddress'])
         else:
