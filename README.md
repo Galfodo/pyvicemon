@@ -3,6 +3,11 @@ Remote machine language monitor for the VICE C64 emulator, implemented in Python
 
 Connects to a running VICE instance (started with -binarymonitor) on 6502@127.0.0.1
 
+When used from a Python script or interactive session, the various debugging functions 
+(e.g `set_breakpoint()`, `wait_for_debugger_event()`, `read_memory()`, `write_memory()`, `load_file()`
+`save_file()`, etc.) can be used for complex debugging scenarios and capturing state in an automated
+fashion.
+
 ## Files:
 * vice_monitor.py - The monitor program
 * miniasm6502.py - Standalone interactive assembler + disassembler, used by the monitor
@@ -39,10 +44,8 @@ help                                                              display help
 All numeric operands are assumed to be hexadecimal unless otherwise specified
 ```
 ## TODO:
-* breakpoint conditions/python evaluators
+* breakpoint conditions
 * modify registers
 * fill memory
 * find
 * ...more?
-
-### Contributors welcome!
