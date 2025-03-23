@@ -11,6 +11,7 @@ import sys
 import re
 import socket
 import select
+import subprocess
 import argparse
 import time
 import numpy as np
@@ -209,6 +210,9 @@ class IncompletePackage(RuntimeError):
 class ResponseNotFound(RuntimeError):
     pass
 
+class FailedToConnectError(RuntimeError):
+    pass
+
 class Body(object):
     def __init__(self, data=b''):
         self._data = data
@@ -389,7 +393,7 @@ def create_socket(address: str='127.0.0.1', port: int=6502, timeout: float=5.0):
     sock.connect((address, port))
     return sock
 
-def get_socket():
+def get_socket(address: str='127.0.0.1', port: int=6502, timeout: float=5.0):
     global VICE_SOCKET
     if not VICE_SOCKET:
         VICE_SOCKET = create_socket()
@@ -886,8 +890,37 @@ def interactive():
                 else:
                     print(f'Unknown command "{tokens[0]}"')
 
+def try_launch_vice(args: List[str]=[], vice_name: str='x64sc'):
+    cmdline = [vice_name] + args
+    try:
+        proc = subprocess.Popen(cmdline)
+        return proc
+    except Exception as e:
+        pass
+    if 'VICE_PATH' in os.environ:
+        try:
+            vice_path = os.environ['VICE_PATH'] + '/' + vice_name
+            cmdline = [vice_path] + args
+            proc = subprocess.Popen(cmdline)
+            return proc
+        except Exception as e:
+            pass
+    return None
+
+def vice_connect(addr: str="127.0.0.1", port: int=6502, timeout: float=5.0, vice_name: str='x64sc', try_launch: bool=False):
+    try:
+        get_socket(address=addr, port=port, timeout=timeout)
+    except Exception:
+        if try_launch:
+            proc = try_launch_vice(args=['-remotemonitor'])
+            if proc is None:
+                raise FailedToConnectError(f'Failed to launch VICE. Make sure "{vice_name}" is in your path or VICE_PATH is defined.')
+        else:
+            raise FailedToConnectError(f'Failed to connect to VICE binary monitor at {port}@{addr}. Specify --auto-launch-vice to launch it automatically.')
+
 def main(argv):
     global SESSION_LOGGER
+    vice_name = 'x64sc'
     parser = argparse.ArgumentParser(
         description='Remote machine language monitor for VICE. Start VICE with -binarymonitor.'
     )
@@ -906,7 +939,29 @@ def main(argv):
         action='store_true',
         help='List monitor commands.'
     )
+    parser.add_argument("--vice-address",
+        default="127.0.0.1",
+        help='VICE instance address',
+    )
+    parser.add_argument("--vice-port",
+        type=int,
+        default=6502,
+        help='VICE monitor port number'
+    )
+    parser.add_argument("-x", "--auto-launch-vice",
+        action='store_true',
+        help=f'Launch VICE if connection cannot be made to a running instance. "{vice_name}" must be in your PATH or VICE_PATH.'
+    )
     args, _ = parser.parse_known_args(args=argv)
+    timeout = 1.0
+    try:
+        vice_connect(addr=args.vice_address, port=args.vice_port, timeout=timeout, try_launch=args.auto_launch_vice)
+    except FailedToConnectError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f'ERROR:\n{e}')
+        sys.exit(1)
     if args.record and args.session:
         with SessionLogger(outfile=args.record, infile=args.session):
             interactive()
