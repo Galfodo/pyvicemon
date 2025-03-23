@@ -7,7 +7,7 @@ Written by stein.pedersen@gmail.com
 import sys
 import re
 from enum import IntEnum
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 
 DEBUG = False
 
@@ -107,6 +107,8 @@ OP_ALIASES = {
 OPS = {}
 DISASM = {}
 
+BRANCH_OPS = set(k for k,v in BASE_6502_OPS.items() if v[AddrMode.REL] is not None)
+
 def config_assembler(mode):
     global OPS
     global DISASM
@@ -170,6 +172,8 @@ def disasm_blob(start_addr: int, data: bytes, max_lines: int = 64) -> Tuple[str,
     """Disassemble a blob of data.
     
     Return the disassembled lines and whatever remains at the end.
+
+    Pass 0 for `max_lines` to disassemble the whole blob.
     """
     lines = []
     addr = start_addr
@@ -186,8 +190,18 @@ def disasm_blob(start_addr: int, data: bytes, max_lines: int = 64) -> Tuple[str,
     return '\n'.join(lines), data
 
 OperandCategory = IntEnum('OperandCategory', ['Empty', 'Imm', 'Abs', 'AbsX', 'AbsY', 'Ind', 'IndX', 'IndY', 'Invalid'], start=0)
-           # Empty Imm                Abs                AbsX                AbsY                Ind                    IndX                    IndY                    Invalid
+           # Empty Imm                Abs                AbsX                 AbsY                 Ind                    IndX                     IndY                     Invalid
 Matchers = [ '$', '#\$?([0-9A-Z]+)$', '\$?([0-9A-Z]+)$', '\$?([0-9A-Z]+),X$', '\$?([0-9A-Z]+),Y$', '\(\$?([0-9A-Z]+)\)$', '\(\$?([0-9A-Z]+),X\)$', '\(\$?([0-9A-Z]+)\),Y$', '.*' ]
+
+def asm_is_branch_instruction(line: str) -> bool:
+    "Determine whether the line of text starts with a branch instruction"
+    op = line.strip().upper()[0:3]
+    return op in BRANCH_OPS
+
+def asm_is_instruction(line: str) -> bool:
+    "Determine whether the line of text starts with a valid mnemonic"
+    op = line.strip().upper()[0:3]
+    return op in OPS
 
 def asm_line(current_addr: int, line: str) -> bytes:
     """Assemble a line of text into bytes.
@@ -242,6 +256,7 @@ def asm_line(current_addr: int, line: str) -> bytes:
                     if len(inttoken) < 3 and op_modes[AddrMode.IZY] is not None:
                         return bytes((op_modes[AddrMode.IZY], intvalue&0xff))
     return None
+
 
 def interactive(addr=0x1000, quit_on_empty_input=False, no_termcodes=False, prefix='', input_stream=sys.stdin) -> Tuple[int, bytes]:
     """Start interactive mode.
