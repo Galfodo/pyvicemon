@@ -19,7 +19,8 @@ from enum import Enum, IntEnum, IntFlag
 
 from typing import List, Dict, Union
 
-sys.path.append(os.path.realpath(os.path.split(sys.argv[0])[0]))
+sys.path.append(os.path.realpath(os.path.dirname(__file__)))
+
 import miniasm6502
 import psid
 
