@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "VICE monitor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "vice_monitor.py",
+            "args": [
+                "--auto-launch-vice"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "galfodo-debugger",
+            "request": "launch",
+            "name": "Run Galfodo Debugger",
+            "program": "${workspaceFolder}/test.bin"
+        }    
+    ]
+}
