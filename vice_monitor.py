@@ -4,7 +4,7 @@ VICE remote monitor. Use with VICE 3.5 or newer and '-binarymonitor' option.
 Written by stein.pedersen@gmail.com
 
 """
-# https://vice-emu.sourceforge.io/vice_12.html#SEC337
+# https://vice-emu.sourceforge.io/vice_13.html#SEC338
 
 import os
 import sys
@@ -15,9 +15,10 @@ import subprocess
 import argparse
 import time
 import numpy as np
+import threading
 from enum import Enum, IntEnum, IntFlag
 
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Callable
 
 sys.path.append(os.path.realpath(os.path.dirname(__file__)))
 
@@ -173,26 +174,72 @@ class SessionLogger(object):
 # Session logger/playback
 SESSION_LOGGER = sys.stdin
 
+
+# Thread-safe response queue
+class ResponseQueue:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._queue = []
+
+    def has_responses(self) -> bool:
+        with self._lock:
+            return bool(self._queue)
+
+    def clear(self):
+        with self._lock:
+            self._queue = []
+
+    def items(self):
+        with self._lock:
+            responses = self._queue
+        for item in responses:
+            yield item
+
+    def pop(self, request_id: int) -> 'Response':
+        """Pop the response to the given request_id. If the request was invalid, InvalidCommand is raised.
+        If the response was not found, ResponseNotFound is raised.
+        """
+        with self._lock:
+            for i, response in enumerate(self._queue):
+                if response.get_request_id() == request_id:
+                    if response.is_command_invalid():
+                        response = self._queue.pop(i)
+                        raise InvalidCommand(repr(response))
+                    return self._queue.pop(i)
+            raise ResponseNotFound(f'request_id: {request_id}')
+
+    def push(self, response: 'Response'):
+        with self._lock:
+            self._queue.append(response)
+
+
 # Global response queue
-RESPONSE_QUEUE: List['Response'] = []
+_RESPONSE_QUEUE = ResponseQueue()
+
 
 # Global request ID. Incremented by Command.__init__()
 REQUEST_ID = 0
 
+
 def format_request_id(item):
     return str(np.int32(item))
+
 
 def format_response_type(item):
     return f'{MonResponse(item).name} ({item:02X})'
 
+
 def format_cmd(item):
     return f'{MonCommand(item).name} ({item:02X})'
+
 
 def format_32(item):
     return f'{item:08X}'
 
+
 def format_default(item):
     return f'{item:02X}'
+
 
 FIELD_FORMATTERS = {
     'cmd': format_cmd,
@@ -202,17 +249,22 @@ FIELD_FORMATTERS = {
     'default': format_default,
 }
 
+
 class InvalidCommand(RuntimeError):
     pass
+
 
 class IncompletePackage(RuntimeError):
     pass
 
+
 class ResponseNotFound(RuntimeError):
     pass
 
+
 class FailedToConnectError(RuntimeError):
     pass
+
 
 class Body(object):
     def __init__(self, data=b''):
@@ -220,16 +272,17 @@ class Body(object):
 
     def __repr__(self) -> str:
         return ' '.join([f'{int(i):02X}' for i in self._data])
-    
+
     def __len__(self) -> int:
         return len(self._data)
-    
+
     def __bool__(self):
         return bool(self._data)
-    
+
     @property
     def data(self):
         return self._data
+
 
 class RegDump(Body):
     def __init__(self, data=b'', id_value_map: Dict = {}):
@@ -251,6 +304,7 @@ class RegDump(Body):
             line0 += f'{name:<{width//4}} '
             line1 += f'{value:<0{width//4}X} '
         return f'{line0}\n{line1}'
+
 
 class MemDump(Body):
     def __init__(self, address: int, data=b''):
@@ -279,6 +333,7 @@ BreakPointInfo_dtype = np.dtype([
     ('memspace',            'u1'),
 ])
 
+
 class BreakPointInfo(Body):
     def __init__(self, data=b''):
         super().__init__(data)
@@ -301,15 +356,16 @@ class BreakPointInfo(Body):
 
     @property
     def mode(self):
-        return BreakPointMode(self.info['CPU_operation'])
+        return BreakPointMode(self.info['CPU_operation'].item())
     
     @property
     def id(self):
-        return int(self.info['checkpoint_number'])
+        return int(self.info['checkpoint_number'].item())
     
     @property
     def addr_range(self):
-        return (int(self.info['start_address']), int(self.info['end_address']))
+        return (int(self.info['start_address'].item()), int(self.info['end_address'].item()))
+
 
 def data_to_bytes(data = []):
     b = b''
@@ -326,6 +382,7 @@ def data_to_bytes(data = []):
             b += i.tobytes()
     return b
 
+
 class Response(object):
     def __init__(self, header, body):
         self.header = header
@@ -335,17 +392,18 @@ class Response(object):
         return self.header['response_type'] == MonResponse.MON_RESPONSE_INVALID.value
 
     def get_response_type(self):
-        return MonResponse(self.header['response_type'])
+        return MonResponse(self.header['response_type'].item())
 
     def get_request_id(self):
-        return int(self.header['request_id'])
-    
+        return int(self.header['request_id'].item())
+
     def __repr__(self):
         l = [ format_header(self.header.tobytes(), CMD_RESPONSE_HEADER_DTYPE, '  ') ]
         if self.body:
             l.append(f'  body: {repr(self.body)}')
         return '\n'.join(l)
-    
+
+
 class Command(object):
     def __init__(self, cmd: MonCommand, cmd_data: List):
         global REQUEST_ID
@@ -362,7 +420,7 @@ class Command(object):
         self.blob = self.binaryheader + self.body.data
 
     def get_request_id(self):
-        return int(self.header['request_id'])
+        return int(self.header['request_id'].item())
 
     def __repr__(self):
         l = [ format_header(self.header.tobytes(), CMD_HEADER_DTYPE, '  ') ]
@@ -370,8 +428,10 @@ class Command(object):
             l.append(f'  body: {repr(self.body)}')
         return '\n'.join(l)
 
+
 def indent_lines(lines: str, indent: str) -> str:
     return '\n'.join([indent + l for l in lines.splitlines()])
+
 
 def log_received(response: Response) -> None:
     if VERBOSE:
@@ -379,14 +439,17 @@ def log_received(response: Response) -> None:
         print(indent_lines(repr(response), '  '))
         print('')
 
+
 def log_sending(command: Command) -> None:
     if VERBOSE:
         print('Sending:')
         print(indent_lines(repr(command), '  '))
         print('')
 
+
 def create_command(cmd: MonCommand, cmd_data: List = []) -> Command:
     return Command(cmd, cmd_data)
+
 
 def create_socket(address: str='127.0.0.1', port: int=6502, timeout: float=5.0):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -394,16 +457,19 @@ def create_socket(address: str='127.0.0.1', port: int=6502, timeout: float=5.0):
     sock.connect((address, port))
     return sock
 
+
 def get_socket(address: str='127.0.0.1', port: int=6502, timeout: float=5.0):
     global VICE_SOCKET
     if not VICE_SOCKET:
         VICE_SOCKET = create_socket()
     return VICE_SOCKET
 
+
 def send_command(command: Command) -> None:
     log_sending(command)
     get_socket().sendall(command.blob)
-    
+
+
 def parse_response(blob):
     """Generator function: Parse raw data to yield Response objects and finally None
     An IncompletePackage exception is raised if data is determined to be incomplete.
@@ -423,9 +489,10 @@ def parse_response(blob):
         blob = remainder[body_size:]
     yield None
 
-def await_response() -> None:
-    """Receive data from the socket, parse it and put responses on the global RESPONSE_QUEUE"""
-    packages = []
+
+def await_response(ignore_resumed: bool=True) -> None:
+    """Receive data from the socket, parse it and put responses on the global response queue"""
+    packages: List[Response] = []
     resp = get_socket().recv(RECV_BUFFER_SIZE)
     while True:
         try:
@@ -439,11 +506,27 @@ def await_response() -> None:
         except IncompletePackage:
             resp = resp + get_socket().recv(RECV_BUFFER_SIZE)
             packages = []
-    RESPONSE_QUEUE.extend(packages)
+    for p in packages:
+        if p.get_response_type() == MonResponse.MON_RESPONSE_RESUMED and ignore_resumed:
+            continue
+        _RESPONSE_QUEUE.push(p)
+
+
+def get_responses() -> List[Response]:
+    responses = list(_RESPONSE_QUEUE.items())
+    clear_responses()
+    return responses
+
 
 def response_pending() -> bool:
     readable, writable, errored = select.select([get_socket()],[],[], 0)
     return get_socket() in readable
+
+
+def flush_pending_responses():
+    if response_pending():
+        get_responses()
+
 
 def format_header(blob, dtype, indent = '') -> str:
     data_size = np.zeros(1, dtype=dtype).dtype.itemsize
@@ -456,16 +539,21 @@ def format_header(blob, dtype, indent = '') -> str:
         l.append(desc)
     return '\n'.join(l)
 
-def pop_response(request_id: int) -> MonResponse:
-    for i, response in enumerate(RESPONSE_QUEUE):
-        if response.get_request_id() == request_id:
-            if response.is_command_invalid():
-                response = RESPONSE_QUEUE.pop(i)
-                raise InvalidCommand(repr(response))
-            return RESPONSE_QUEUE.pop(i)
-    raise ResponseNotFound(f'request_id: {request_id}')
 
-def roundtrip_command(cmd: MonCommand, cmd_data: List=[], blocking=True) -> MonResponse:
+def clear_responses():
+    """Clear response queue"""
+    _RESPONSE_QUEUE.clear()
+
+
+def pop_response(request_id: int) -> Response:
+    return _RESPONSE_QUEUE.pop(request_id=request_id)
+
+
+def any_responses() -> bool:
+    return _RESPONSE_QUEUE.has_responses()
+
+
+def roundtrip_command(cmd: MonCommand, cmd_data: List=[], blocking=True) -> Response:
     command = create_command(cmd, cmd_data)
     send_command(command)
     request_id = command.get_request_id()
@@ -477,9 +565,10 @@ def roundtrip_command(cmd: MonCommand, cmd_data: List=[], blocking=True) -> MonR
             pass
 
 def read_memory(first_addr: int, last_addr: int, side_effects: bool = False, memspace: MemSpace = MemSpace.MEM_MAIN, bankid: int = 0) -> MemDump:
-    cmd_data = [ 1 if side_effects else 0, np.uint16(first_addr), np.uint16(min(last_addr, 0xffff)), memspace.value, np.uint16(bankid) ]
+    cmd_data = [ 1 if side_effects else 0, np.uint16(max(first_addr, 0)), np.uint16(min(last_addr, 0xffff)), memspace.value, np.uint16(bankid) ]
     response = roundtrip_command(MonCommand.memory_get, cmd_data)
     return MemDump(first_addr, response.body.data[2:])
+
 
 def write_memory(address: int, data: bytes = b'', side_effects: bool = False, memspace: MemSpace = MemSpace.MEM_MAIN, bankid: int = 0) -> Response:
     last_addr = min(address + len(data) - 1, 0xffff)
@@ -487,6 +576,29 @@ def write_memory(address: int, data: bytes = b'', side_effects: bool = False, me
     cmd_data = [ 1 if side_effects else 0, np.uint16(address), np.uint16(last_addr), memspace.value, np.uint16(bankid), data[:data_size] ]
     response = roundtrip_command(MonCommand.memory_set, cmd_data)
     return response
+
+
+def reset_machine(mode: int=0):
+    """
+    Mode 0 (default) reset system
+         1           powercycle
+         8-11        reset drive
+    """
+    cmd_data = [ mode ]
+    response = roundtrip_command(MonCommand.reset, cmd_data)
+    return response
+
+
+def keyboard_put(petscii_string: bytes):
+    """Put a PETSCII string to the keyboard buffer, e.g:
+
+    b'RUN\r'
+
+    """
+    cmd_data = [ len(petscii_string), petscii_string ]
+    response = roundtrip_command(MonCommand.keyboard_feed, cmd_data)
+    return response
+
 
 def get_registers_available(memspace: MemSpace = MemSpace.MEM_MAIN) -> None:
     AVAILABLE_REGISTERS.clear()
@@ -506,6 +618,7 @@ def get_registers_available(memspace: MemSpace = MemSpace.MEM_MAIN) -> None:
         AVAILABLE_REGISTER_NAMES[reg_name] = reg_id
         item_offset += item_size + 1
 
+
 def get_registers(memspace: MemSpace = MemSpace.MEM_MAIN) -> RegDump:
     if not AVAILABLE_REGISTERS:
         get_registers_available()
@@ -524,7 +637,10 @@ def get_registers(memspace: MemSpace = MemSpace.MEM_MAIN) -> RegDump:
         item_offset += item_size + 1
     return RegDump(data, registers)
 
+
 def set_registers(name_value_map: Dict[str, int], memspace: MemSpace = MemSpace.MEM_MAIN) -> Response:
+    if not AVAILABLE_REGISTERS:
+        get_registers_available()
     cmd_data = [ memspace.value, np.uint16(len(name_value_map)) ]
     for name, value in name_value_map.items():
         id = AVAILABLE_REGISTER_NAMES[name]
@@ -533,14 +649,59 @@ def set_registers(name_value_map: Dict[str, int], memspace: MemSpace = MemSpace.
     response = roundtrip_command(MonCommand.registers_set, cmd_data)
     return response
 
+
 def monitor_ping():
     return roundtrip_command(MonCommand.ping)
+
 
 def monitor_exit():
     return roundtrip_command(MonCommand.exit)
 
+
 def monitor_quit():
     return roundtrip_command(MonCommand.quit)
+
+
+def step_over():
+    roundtrip_command(MonCommand.advance_instructions, cmd_data=[1, np.int16(1)])
+
+
+def step_into():
+    roundtrip_command(MonCommand.advance_instructions, cmd_data=[0, np.int16(1)])
+
+
+def step_out(step_out_of_scope: bool=True):
+    """Step out of subroutine or loop.
+
+    If the program counter is at a backward branch, run until the next instruction
+    after the branch instruction is hit.
+
+    The loop-scope behavior can be disabled by passing False for `step_out_of_scope`
+    """
+    if step_out_of_scope:
+        pc = get_registers()['PC']
+        mem = read_memory(pc, pc+2)
+        op = mem.data[0]
+        operand = mem.data[1]
+        if (op & 0x0f) == 0 and (op & 0x10) == 0x10 and (operand & 0x80):
+            bpaddr = pc + 2
+            # This should be a temporary breakpoint but they behave weirdly,
+            # so we create a normal one and delete it after it has been hit.
+            bpinfo = set_breakpoint(bpaddr, is_temporary=False)
+            _RESPONSE_QUEUE.clear()
+            wait_for_debugger_event()
+            delete_breakpoint(bpinfo)
+            for r in _RESPONSE_QUEUE.items():
+                print(str(r))
+            _RESPONSE_QUEUE.clear()
+            return
+    roundtrip_command(MonCommand.execute_until_return)
+
+
+def delete_breakpoint(bpinfo: BreakPointInfo):
+    cmd_data = [np.uint32(bpinfo.id)]
+    response = roundtrip_command(MonCommand.checkpoint_delete, cmd_data)
+
 
 def set_breakpoint(
         first_addr: int, 
@@ -550,12 +711,18 @@ def set_breakpoint(
         stop_when_hit: bool=True,
         is_temporary: bool=False, 
         memspace: MemSpace=MemSpace.MEM_MAIN, 
-        condition: str=''):
+        condition: str='',
+        quiet=True):
+    last_addr = first_addr + 1 if last_addr < 0 else last_addr
     cmd_data = [np.uint16(first_addr), np.uint16(last_addr), is_enabled, stop_when_hit, mode, is_temporary, memspace]
     response = roundtrip_command(MonCommand.checkpoint_set, cmd_data)
-    print(BreakPointInfo(response.body.data))
+    bpinfo = BreakPointInfo(response.body.data)
+    if not quiet:
+        print(bpinfo)
     if condition:
         raise NotImplementedError("breakpoint condition")
+    return bpinfo
+
 
 def dumpregs():
     regs = get_registers()
@@ -563,12 +730,15 @@ def dumpregs():
     print()
     return regs
 
+
 WORD_PAT = '([0-9a-fA-F]{1,4})'
 BYTE_PAT = '([0-9a-fA-F]{1,2})'
 STR_PAT  = '(".*")'
 
+
 def int_16(token: str) -> int:
     return int(token, base=16)&0xffff
+
 
 def parse_token(token: str, pat, converter=int_16):
     m = re.match(pat, token)
@@ -576,6 +746,7 @@ def parse_token(token: str, pat, converter=int_16):
         value = converter(m[1])
         return True, value
     return False, None
+
 
 def consume_word_token(input_tokens: List[str], default_or_none: None, name: str = '<address>') -> int:
     if input_tokens:
@@ -590,11 +761,13 @@ def consume_word_token(input_tokens: List[str], default_or_none: None, name: str
     else:
         raise SyntaxError(f'Please specify a 16-bit hexadecimal number for "{name}"')
 
+
 def consume_lastaddr_token(input_tokens: List[str], default_or_none: None, name: str = '<last-address>', firstaddr: int=0, first_name: str = '<first-address>') -> int:
     lastaddr = consume_word_token(input_tokens, default_or_none, name)
     if lastaddr < firstaddr:
         raise ValueError(f'"{name}" must be greater or equal to "{first_name}"')
     return lastaddr
+
 
 def consume_float_token(input_tokens: List[str], default_or_none: None, name: str='<float>') -> float:
     if input_tokens:
@@ -608,6 +781,7 @@ def consume_float_token(input_tokens: List[str], default_or_none: None, name: st
         raise SyntaxError(f'Please specify a string value for {name}')
     return default_or_none
 
+
 def consume_string_token(input_tokens: List[str], default_or_none: None, name: str='<string>') -> str:
     if input_tokens:
         token = input_tokens.pop(0)
@@ -617,6 +791,7 @@ def consume_string_token(input_tokens: List[str], default_or_none: None, name: s
     if default_or_none is None:
         raise SyntaxError(f'Please specify a string value for {name}')
     return default_or_none
+
 
 def parse_cmd_m(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
@@ -628,25 +803,41 @@ def parse_cmd_m(input_tokens: List[str]) -> None:
     print(mem)
     PROMPT_ADDR = last + 1
 
+
 DISASM_DEFAULT_LINES = 25
+
+
+def disasm_lines(addr: int | None=None, lines: int=1):
+    if addr is None:
+        addr = get_registers()['PC']
+    mem = read_memory(addr, addr+lines*3)
+    text, remainder = miniasm6502.disasm_blob(addr, mem.data, max_lines=lines)
+    print(text)
+    return mem, remainder
+
+
+def disasm_line(addr: int | None=None, lines: int=1):
+    return disasm_lines(addr=addr, lines=lines)
+
 
 def parse_cmd_d(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
     first = consume_word_token(input_tokens, PROMPT_ADDR, '<address>')
-    mem = read_memory(first, first+DISASM_DEFAULT_LINES*3)
-    text, remainder = miniasm6502.disasm_blob(first, mem.data, max_lines=DISASM_DEFAULT_LINES)
-    print(text)
+    mem, remainder = disasm_lines(first, DISASM_DEFAULT_LINES)
     PROMPT_ADDR = first + len(mem.data) - len(remainder)
+
 
 def parse_cmd_r(input_tokens: List[str]) -> None:
     regs = get_registers()
     print(regs)
+
 
 def parse_cmd_a(input_tokens: List[str]) -> None:
     first = consume_word_token(input_tokens, None, '<address>')
     first, data = miniasm6502.interactive(first, quit_on_empty_input=True, prefix=' '.join(input_tokens), input_stream=SESSION_LOGGER)
     if data:
         write_memory(first, data)
+
 
 def parse_cmd_wm(input_tokens: List[str]) -> None:
     global PROMPT_ADDR
@@ -661,6 +852,7 @@ def parse_cmd_wm(input_tokens: List[str]) -> None:
         data = data_to_bytes(cmd_data)
         write_memory(first, data)
         PROMPT_ADDR = first + len(data)
+
 
 def load_file(filename:str, load_addr: int = 0, no_header: bool = False):
     """Load a binary file.
@@ -686,6 +878,7 @@ def load_file(filename:str, load_addr: int = 0, no_header: bool = False):
         return load_addr or sid.get_load_address(), sid.get_body()
     return load_addr, data
 
+
 def save_file(filename:str, data: bytes, first_addr: int, last_addr: int, load_addr: int = 0, no_header: bool = False) -> None:
     """Save a binary file.
     
@@ -704,14 +897,20 @@ def save_file(filename:str, data: bytes, first_addr: int, last_addr: int, load_a
     with open(filename, 'wb') as outfile: 
         outfile.write(data)
 
-def wait_for_debugger_event(timeout: Union[float,None] = None):
+
+def wait_for_debugger_event(timeout: Union[float,None] = None, stop_event: threading.Event=None) -> bool:
     """Resume the emulator and wait for a debugger event.
 
     A timeout may be specified, but the user can also break and pause
     the emulator by pressing Ctrl-C
+
+    RETURNS:
+
+    True if an event ocurred, False otherwise.
+
     """
+
     target_time = time.time() + timeout if timeout else 0
-    global RESPONSE_QUEUE
     monitor_exit()
     while response_pending():
         await_response()
@@ -722,32 +921,38 @@ def wait_for_debugger_event(timeout: Union[float,None] = None):
         # if the socket is set to blocking, we can not catch Ctrl-C until
         # socket.recv() returns.
         sock.settimeout(1.0)
-        RESPONSE_QUEUE.clear()
         while True:
+            if stop_event and stop_event.is_set():
+                print("[Debugger event interrupted]")
+                _RESPONSE_QUEUE.clear()
+                break
             try:
                 await_response()
             except socket.timeout:
                 pass
             except TimeoutError:
                 pass
-            if len(RESPONSE_QUEUE):
+            if _RESPONSE_QUEUE.has_responses():
                 break
             if timeout is None:
                 continue
             if target_time and target_time < time.time():
                 print('[Timeout]')
-                RESPONSE_QUEUE.clear()
+                _RESPONSE_QUEUE.clear()
                 break
     except KeyboardInterrupt:
         print('[User Break]')
-        RESPONSE_QUEUE.clear()
+        _RESPONSE_QUEUE.clear()
     finally:
         sock.settimeout(socket_timeout)
+    return any_responses()
+
 
 MONITOR_HELP = """Monitor help:
 
 Commands:
 """
+
 
 def parse_cmd_help(input_tokens: List[str]) -> None:
     print(MONITOR_HELP)
@@ -755,6 +960,7 @@ def parse_cmd_help(input_tokens: List[str]) -> None:
         _, info, args = COMMAND_PARSERS[name]
         print(f'{name:<4} {args:60} {info}')
     print("\nAll numeric operands are assumed to be hexadecimal unless otherwise specified")
+
 
 def parse_cmd_s(input_tokens: List[str]) -> None:
     filename = consume_string_token(input_tokens, None, '<filename>')
@@ -766,12 +972,14 @@ def parse_cmd_s(input_tokens: List[str]) -> None:
     extra = f', load address: ${load:04X}' if load else ''
     print(f'Saved "{os.path.split(filename)[1]}" from ${first:04X} to ${first+len(mem.data)-1:04X}{extra}')
 
+
 def parse_cmd_g(input_tokens: List[str]) -> None:
     global BREAK_ADDR
     addr = consume_word_token(input_tokens, BREAK_ADDR, '<address>')
     if addr != BREAK_ADDR:
         set_registers({"PC": addr})
     monitor_exit()
+
 
 def parse_cmd_l(input_tokens: List[str]) -> None:
     filename = consume_string_token(input_tokens, None, '<filename>')
@@ -780,35 +988,72 @@ def parse_cmd_l(input_tokens: List[str]) -> None:
     write_memory(load_addr, body)
     print(f'Loaded "{os.path.split(filename)[1]}" from ${load_addr:04X} to ${load_addr+len(body)-1:04X}')
 
+
 def parse_cmd_break(input_tokens: List[str], mode: BreakPointMode):
     first_addr = consume_word_token(input_tokens, None, '<address>')
     last_addr = consume_lastaddr_token(input_tokens, first_addr, "<last-address>", first_addr, "<first-address")
     condition = consume_string_token(input_tokens, '', "<condition>")
     set_breakpoint(first_addr, last_addr, mode=mode, condition=condition)
 
+
 def parse_cmd_b(input_tokens: List[str]) -> None:
     return parse_cmd_break(input_tokens, BreakPointMode.BREAK_EXEC)
+
 
 def parse_cmd_br(input_tokens: List[str]) -> None:
     return parse_cmd_break(input_tokens, BreakPointMode.BREAK_LOAD)
 
+
 def parse_cmd_bw(input_tokens: List[str]) -> None:
     return parse_cmd_break(input_tokens, BreakPointMode.BREAK_STORE)
+
 
 def parse_cmd_resume(input_tokens: List[str]) -> None:
     monitor_exit()
 
+
 def parse_cmd_c(input_tokens: List[str]) -> None:
+    global BREAK_ADDR, PROMPT_ADDR
     timeout_value = consume_float_token(input_tokens, -1.0, '<timeout>')
+    _RESPONSE_QUEUE.clear()
     wait_for_debugger_event(timeout_value if timeout_value >= 0 else None)
-    for r in RESPONSE_QUEUE:
+    for r in _RESPONSE_QUEUE.items():
         if r.get_response_type() == MonResponse.MON_RESPONSE_CHECKPOINT_GET:
             print('[Breakpoint Hit]')
             print(BreakPointInfo(r.body.data))
         else:
             print('Unexpected response:')
             print(r)
-    dumpregs()
+            pass
+    regs = dumpregs()
+    BREAK_ADDR = PROMPT_ADDR = regs['PC']
+
+
+def parse_cmd_n(input_tokens: List[str]) -> None:
+    # step over
+    global BREAK_ADDR, PROMPT_ADDR
+    step_over()
+    disasm_line()
+    regs = get_registers()
+    BREAK_ADDR = PROMPT_ADDR = regs['PC']
+
+
+def parse_cmd_z(input_tokens: List[str]) -> None:
+    # step into
+    global BREAK_ADDR, PROMPT_ADDR
+    step_into()
+    disasm_line()
+    regs = get_registers()
+    BREAK_ADDR = PROMPT_ADDR = regs['PC']
+
+
+def parse_cmd_o(input_tokens: List[str]) -> None:
+    # step out
+    global BREAK_ADDR, PROMPT_ADDR
+    step_out()
+    disasm_line()
+    regs = get_registers()
+    BREAK_ADDR = PROMPT_ADDR = regs['PC']
 
 COMMAND_PARSERS = {
     "x": (None,                 "exit interactive mode and resume emulator", ""),
@@ -824,11 +1069,14 @@ COMMAND_PARSERS = {
     "b": (parse_cmd_b,          "set execution breakpoint", "<first-address> [last-address]"),
     "br":(parse_cmd_br,         "set data breakpoint (read)", "<first-address> [last-address]"),
     "bw":(parse_cmd_bw,         "set data breakpoint (write)", "<first-address> [last-address]"),
-
     "c": (parse_cmd_c,          "continue and wait for debugger event", "[timeout (seconds, decimal)]"),
+    "n": (parse_cmd_n,          "step-over", ""),
+    "z": (parse_cmd_z,          "step-into", ""),
+    "o": (parse_cmd_o,          "step-out", ""),
 
     "help": (parse_cmd_help,    "display help", ""),
 }
+
 
 def tokenize(input: str) -> List[str]:
     # This is pretty primitive, but works for now
@@ -842,6 +1090,7 @@ def tokenize(input: str) -> List[str]:
                 t += next(it)
         tok.append(t)
     return tok
+
 
 def interactive():
     global PROMPT
@@ -891,6 +1140,7 @@ def interactive():
                 else:
                     print(f'Unknown command "{tokens[0]}"')
 
+
 def try_launch_vice(args: List[str]=[], vice_name: str='x64sc'):
     cmdline = [vice_name] + args
     try:
@@ -908,6 +1158,7 @@ def try_launch_vice(args: List[str]=[], vice_name: str='x64sc'):
             pass
     return None
 
+
 def vice_connect(addr: str="127.0.0.1", port: int=6502, timeout: float=5.0, vice_name: str='x64sc', try_launch: bool=False):
     try:
         get_socket(address=addr, port=port, timeout=timeout)
@@ -918,6 +1169,7 @@ def vice_connect(addr: str="127.0.0.1", port: int=6502, timeout: float=5.0, vice
                 raise FailedToConnectError(f'Failed to launch VICE. Make sure "{vice_name}" is in your path or VICE_PATH is defined.')
         else:
             raise FailedToConnectError(f'Failed to connect to VICE binary monitor at {port}@{addr}. Specify --auto-launch-vice to launch it automatically.')
+
 
 def main(argv):
     global SESSION_LOGGER

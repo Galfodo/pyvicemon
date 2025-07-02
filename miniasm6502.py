@@ -106,13 +106,16 @@ OP_ALIASES = {
 
 OPS = {}
 DISASM = {}
+DISASM_BASE = {}
 
 BRANCH_OPS = set(k for k,v in BASE_6502_OPS.items() if v[AddrMode.REL] is not None)
 
 def config_assembler(mode):
     global OPS
     global DISASM
+    global DISASM_BASE
     OPS = dict.copy(BASE_6502_OPS)
+    DISASM_BASE = { val: op for op in OPS for val in OPS[op] if val is not None }
     if mode == 6510:
         OPS.update(UNDOCUMENTED_6510_OPS)
     DISASM = { val: op for op in OPS for val in OPS[op] if val is not None }
@@ -153,7 +156,7 @@ def disasm_line(current_addr: int, data: bytes) -> Tuple[str, bytes]:
         relop   = ''
         if consumed == 2:
             operand = f'${data[1]&0xff:02X}'
-            relop   = f'${current_addr+2+int.from_bytes(data[1:2], byteorder="little", signed=True):04X}'
+            relop   = f'${(int(current_addr)+2+int.from_bytes(data[1:2], byteorder="little", signed=True))&0xffff:04X}'
         elif consumed == 3:
             operand = f'${data[2]&0xff:02X}{data[1]&0xff:02X}'
         if op in DISASM:
@@ -168,17 +171,21 @@ def disasm_line(current_addr: int, data: bytes) -> Tuple[str, bytes]:
     except IndexError:
         return None, None
 
-def disasm_blob(start_addr: int, data: bytes, max_lines: int = 64) -> Tuple[str, bytes]:
+def disasm_blob(start_addr: int, data: bytes, max_lines: int = 64, base_addr: int=None) -> Tuple[str, bytes]:
     """Disassemble a blob of data.
     
     Return the disassembled lines and whatever remains at the end.
 
-    Pass 0 for `max_lines` to disassemble the whole blob.
+    Pass None for `max_lines` to disassemble the whole blob.
     """
+    if base_addr is not None:
+        assert base_addr <= start_addr
+        offset = start_addr - base_addr
+        data = data[offset:]
     lines = []
     addr = start_addr
     line_count = 0
-    while max_lines == 0 or line_count < max_lines:
+    while max_lines is None or line_count < max_lines:
         line, remainder = disasm_line(addr, data)
         if line:
             lines.append(line)
@@ -189,9 +196,110 @@ def disasm_blob(start_addr: int, data: bytes, max_lines: int = 64) -> Tuple[str,
             break
     return '\n'.join(lines), data
 
+def disasm_blob_reverse(base_addr: int, start_addr: int, data: bytes, max_lines: int=32) -> Tuple[str, bytes]:
+    """This function produces a disassembly backwards from `start_addr`.
+    
+    It attempts disassembly instruction-by-instruction and selects the candidate within
+    a 3-byte window that gives the longest sequence of valid instructions (with a cut-off).
+
+    Returns the disassembled data and whatever prefix that was not disassembled.
+    """
+    lines = []
+    assert start_addr >= base_addr
+    offset = start_addr - base_addr
+
+    def get_candidates_at(offset: int) -> List[int]:
+        found = []
+        grab_offset = max(offset-3, 0)
+        candidates = reversed(data[grab_offset:offset])
+        for i, op in enumerate(candidates):
+            if op in DISASM:
+                if compute_operand_size(op) == i:
+                    found.append(offset - i - 1)
+        return found
+
+    # This could be optimized by caching the longest path for
+    # each offset. 
+    def get_max_path(candidates: List[int], cur_len=1, cutoff=8):
+        assert candidates
+        max_path = candidates[0]
+        max_len = cur_len
+        if cur_len == cutoff:
+            return max_path, cur_len
+        for offset in reversed(candidates):
+            next_candidates = get_candidates_at(offset)
+            if next_candidates:
+                _, len_ = get_max_path(next_candidates, cur_len+1)
+                if len_ > max_len:
+                    max_len = len_
+                    max_path = offset
+        return max_path, max_len
+                
+    def get_best(candidates: List[int], cur_len=1) -> int:
+        best, _ = get_max_path(candidates)
+        return best
+
+    while offset > 0 and len(lines) < max_lines:
+        found = get_candidates_at(offset)
+        if found:
+            best = get_best(found)
+            txt, _ = disasm_line(base_addr + best, data=data[best:offset])
+            lines.append(txt)
+            offset = best
+        else:
+            offset -= 1
+            val = data[offset]
+            txt = f'{base_addr+offset:04X} {val:02X}       ???'
+            lines.append(txt)
+    remainder = data[0:offset]
+    return '\n'.join(reversed(lines)), remainder
+
+
+def disasm_blob_with_offset(base_addr: int, start_addr: int, data: bytes, line_count: int, line_offset: int=0) -> str:
+    """Produce disassembly based from `start_addr` with positive or negative `line_offset`
+
+    Will produce the exact number of lines specified by `line_count` ... Incomplete
+    instructions will be shown as their byte values and unknown data will be shown as `??`
+    """
+    ## --> This is to accommodate the unit tests
+    mem = bytearray(0xff if x & 0x10 else 0x00 for x in range(65536))
+    mem[0] = 0x2f
+    mem[1] = 0x37
+    ## <--
+    max_copy = min(len(data), 65536 - base_addr)
+    mem[base_addr:base_addr + max_copy] = data[:max_copy]
+    data = bytes(mem) * 3
+    base_addr = 65536
+    start_addr = base_addr + start_addr
+    txt_lines = []
+    remaining_lines = line_count
+    if line_offset < 0:
+        rev_count = -line_offset
+        txt, _ = disasm_blob_reverse(base_addr=0, start_addr=start_addr, data=data, max_lines=rev_count)
+        lines = txt.splitlines()[:line_count]
+        remaining_lines -= len(lines)
+        txt_lines = lines
+    fwd_offset = 0 if line_offset <= 0 else line_offset
+    txt, _ = disasm_blob(base_addr=base_addr, start_addr=start_addr, data=data, max_lines=remaining_lines + fwd_offset)
+    lines = txt.splitlines()[fwd_offset:]
+    txt_lines.extend(lines)
+    txt = '\n'.join(txt_lines)
+    return txt.strip()
+
+
 OperandCategory = IntEnum('OperandCategory', ['Empty', 'Imm', 'Abs', 'AbsX', 'AbsY', 'Ind', 'IndX', 'IndY', 'Invalid'], start=0)
            # Empty Imm                Abs                AbsX                 AbsY                 Ind                    IndX                     IndY                     Invalid
-Matchers = [ '$', '#\$?([0-9A-Z]+)$', '\$?([0-9A-Z]+)$', '\$?([0-9A-Z]+),X$', '\$?([0-9A-Z]+),Y$', '\(\$?([0-9A-Z]+)\)$', '\(\$?([0-9A-Z]+),X\)$', '\(\$?([0-9A-Z]+)\),Y$', '.*' ]
+Matchers = [
+    r'$',
+    r'#\$?([0-9A-Z]+)$',
+    r'\$?([0-9A-Z]+)$',
+    r'\$?([0-9A-Z]+),X$',
+    r'\$?([0-9A-Z]+),Y$',
+    r'\(\$?([0-9A-Z]+)\)$',
+    r'\(\$?([0-9A-Z]+),X\)$',
+    r'\(\$?([0-9A-Z]+)\),Y$',
+    r'.*'
+]
 
 def asm_is_branch_instruction(line: str) -> bool:
     "Determine whether the line of text starts with a branch instruction"
