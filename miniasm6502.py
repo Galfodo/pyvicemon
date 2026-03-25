@@ -87,7 +87,7 @@ UNDOCUMENTED_6510_OPS = {
   "DCP": [ None,None,0xC7,0xD7,None,0xC3,0xD3,0xCF,0xDF,0xDB,None,None ],
   "ISC": [ None,None,0xE7,0xF7,None,0xE3,0xF3,0xEF,0xFF,0xFB,None,None ],
   "ANC": [ None,0x0B,None,None,None,None,None,None,None,None,None,None ],
-  "ANC": [ None,0x2B,None,None,None,None,None,None,None,None,None,None ],
+  "anc": [ None,0x2B,None,None,None,None,None,None,None,None,None,None ],
   "ALR": [ None,0x4B,None,None,None,None,None,None,None,None,None,None ],
   "ARR": [ None,0x6B,None,None,None,None,None,None,None,None,None,None ],
   "XAA": [ None,0x8B,None,None,None,None,None,None,None,None,None,None ],
@@ -352,7 +352,7 @@ def asm_line(current_addr: int, line: str) -> bytes:
                 elif cat == OperandCategory.AbsY:
                     if len(inttoken) < 3 and op_modes[AddrMode.ZPY] is not None:
                         return bytes((op_modes[AddrMode.ZPY], intvalue&0xff))
-                    if op_modes[AddrMode.ABX] is not None:
+                    if op_modes[AddrMode.ABY] is not None:
                         return bytes((op_modes[AddrMode.ABY], intvalue&0xff, (intvalue>>8)&0xff))
                 elif cat == OperandCategory.Ind:
                     if op_modes[AddrMode.IND] is not None:
@@ -405,7 +405,7 @@ def interactive(addr=0x1000, quit_on_empty_input=False, no_termcodes=False, pref
                 l = ' '.join(tokens[1:])
                 if not l.strip():
                     continue
-            except:
+            except (IndexError, ValueError):
                 print('???')
                 continue
         l = l.strip()
